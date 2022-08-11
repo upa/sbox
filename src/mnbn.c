@@ -41,14 +41,13 @@ int unix_client_sock(void)
 int mnbn_send_req(int sock, int notif_fd)
 {
         char buf[CMSG_SPACE(sizeof(int))];
+        char c = 'c';
         struct msghdr msg = {};
         struct cmsghdr *cmsg;
         struct iovec iov[1];
-        struct mnbn_target_req req;
 
-        req.pid = getpid();
-        iov[0].iov_base = &req;
-        iov[0].iov_len = sizeof(req);
+        iov[0].iov_base = &c;
+        iov[0].iov_len = 1;
         msg.msg_iov = iov;
         msg.msg_iovlen = 1;
         msg.msg_control = buf;

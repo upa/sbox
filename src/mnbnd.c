@@ -1,4 +1,4 @@
- #define _GNU_SOURCE
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -256,13 +256,11 @@ int mnbnd_is_secure_fd(struct mnbnd_proc *p, int fd)
          */
         char proc_path[PATH_MAX], file_path[PATH_MAX];
 
-#if 0
         /* check cache */
         if (FD_ISSET(fd, &p->secure_fds))
                 return 1;
         else if (FD_ISSET(fd, &p->insecure_fds))
                 return 0;
- #endif
 
         /* not hit in the cache. check /proc/X/fd/FD*/
         snprintf(proc_path, sizeof(proc_path), "/proc/%d/fd/%d", p->pid, fd);
@@ -272,7 +270,7 @@ int mnbnd_is_secure_fd(struct mnbnd_proc *p, int fd)
                 return -1;
         }
         
-        pr_warn("check proc %s -> %s\n", proc_path, file_path);
+        pr_v3("check proc %s -> %s\n", proc_path, file_path);
 
         if (strstr(file_path, "secure")) {
                 FD_SET(fd, &p->secure_fds);
@@ -297,11 +295,12 @@ void mnbnd_handle_read(struct mnbnd_proc *t, struct seccomp_notif *req)
         if (ret < -1)
                 return;
 
-        pr_v3("read fd=%d 0x%llx-0x%llx\n", fd, args[1], args[1] + args[2]);
+        pr_v3("pid=%d read fd=%d 0x%llx-0x%llx\n", req->pid,
+              fd, args[1], args[1] + args[2]);
 
         if (ret) {
                 /* fd is secure. mark this buf region has secure content */
-                pr_v3("read from secure fd %d\n", fd);
+                pr_v3("pid=%d read from secure fd %d\n", req->pid, fd);
                 if(mnbnd_proc_add_mem(t, args[1], args[2]) < 0)
                         return; /* XXX: should stop the process */
         } else {
@@ -321,7 +320,8 @@ void mnbnd_handle_write(struct mnbnd_proc *t, struct seccomp_notif *req)
         if (ret < -1)
                 return;
 
-        pr_v3("write fd=%d 0x%llx-0x%llx\n", fd, args[1], args[1] + args[2]);
+        pr_v3("pid=%d write fd=%d 0x%llx-0x%llx\n", req->pid,
+              fd, args[1], args[1] + args[2]);
 
         if (ret) {
                 pr_v3("write to secure fd %d, pass\n", fd);
@@ -331,11 +331,12 @@ void mnbnd_handle_write(struct mnbnd_proc *t, struct seccomp_notif *req)
         /* write to unsecure fd. check whether buf has secure content */
         ret = mnbnd_proc_check_mem(t, args[1], args[2]);
         if (ret) {
-                pr_v1("write to secure buf to insecure fd %d!!\n", fd);
+                pr_warn("pid=%d write secure buf to insecure fd %d !!!!\n",
+                        req->pid, fd);
                 if (mnbnd_compromise_buf(t, args[1], args[2]) < 0)
                         pr_err("failed to compromise output\n");
         } else {
-                pr_v3("write to insecure buf to insecure fd %d\n", fd);
+                pr_v3("write insecure buf to insecure fd %d\n", fd);
         }
 }
 
@@ -369,7 +370,7 @@ void mnbnd_handle_req(int notif_fd, struct seccomp_notif *req,
         p = mnbnd_proc_find(req->pid);
         if (!p) {
                 pr_err("abort\n");
-                return;
+                goto out;
         }
 
         if (strcmp(syscall, "read") == 0) {
@@ -453,17 +454,16 @@ void *mnbnd_thread(void *arg)
                         pr_err("%s: seccomp_notify_receive: %s, errno %s\n",
                                prefix, strerror(ret * -1),
                                strerror(errno));
-                        break;
+                        continue;
                 }
                 
                 if (seccomp_notify_id_valid(notif_fd, req->id) != 0) {
                         pr_warn("%s: invalid notify id. process exited?\n",
                                 prefix);
-                        break;
+                        continue;
                 }
 
                 /* handle notif req */
-
                 mnbnd_handle_req(notif_fd, req, rep);
         }
         
@@ -491,16 +491,15 @@ void mnbnd_spawn(int notif_fd)
                 pr_err("failed to spawn mnbnd thread: %s\n", strerror(errno));
 }
 
-/* return notify fd or -1 when faild, and fill *req */
-int mnbnd_recv_req(int sock, struct mnbn_target_req *req)
+int mnbnd_recv_req(int sock)
 {
-        char buf[CMSG_SPACE(sizeof(int))];
+        char buf[CMSG_SPACE(sizeof(int))], c;
         struct msghdr msg = {};
         struct cmsghdr *cmsg;
         struct iovec iov[1];
         
-        iov[0].iov_base = req;
-        iov[0].iov_len = sizeof(*req);
+        iov[0].iov_base = &c;
+        iov[0].iov_len = 1;
         msg.msg_iov = iov;
         msg.msg_iovlen = 1;
         msg.msg_control = buf;
@@ -512,8 +511,6 @@ int mnbnd_recv_req(int sock, struct mnbn_target_req *req)
                 return -1;
         }
 
-        pr_v2("request received from pid %d\n", req->pid);
-
         cmsg = CMSG_FIRSTHDR(&msg);
         return *((int *)CMSG_DATA(cmsg));
 }
@@ -521,7 +518,6 @@ int mnbnd_recv_req(int sock, struct mnbn_target_req *req)
 int mnbnd(int un_sock)
 {
         struct pollfd x = { .fd = un_sock, .events = POLLIN };
-        struct mnbn_target_req req;
         struct sockaddr_storage ss;
         int fd, notif_fd, ret = 0;
         socklen_t addrlen;
@@ -549,7 +545,7 @@ int mnbnd(int un_sock)
                         break;
                 }
 
-                notif_fd = mnbnd_recv_req(fd, &req);
+                notif_fd = mnbnd_recv_req(fd);
                 if (notif_fd < 0) {
                         continue;
                 }
