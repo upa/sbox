@@ -7,7 +7,7 @@
 #include <linux/un.h>
 #include <seccomp.h>
 
-#include <mnbn.h>
+#include <sbox.h>
 #include <util.h>
 int verbose = 0;
 
@@ -17,7 +17,7 @@ int unix_client_sock(void)
         struct sockaddr_un un;
         int sock;
 
-        pr_v3("create unix client socket on %s\n", MNBND_UNIX_DOMAIN);
+        pr_v3("create unix client socket on %s\n", SBOXD_UNIX_DOMAIN);
 
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock < 0) {
@@ -27,10 +27,10 @@ int unix_client_sock(void)
 
         memset(&un, 0, sizeof(un));
         un.sun_family = AF_UNIX;
-        strncpy(un.sun_path, MNBND_UNIX_DOMAIN, UNIX_PATH_MAX);
+        strncpy(un.sun_path, SBOXD_UNIX_DOMAIN, UNIX_PATH_MAX);
         if (connect(sock, (struct sockaddr *)&un, sizeof(un)) < 0) {
                 pr_err("failed to connect to %s: %s\n",
-                       MNBND_UNIX_DOMAIN, strerror(errno));
+                       SBOXD_UNIX_DOMAIN, strerror(errno));
                 close(sock);
                 return -1;
         }
@@ -38,7 +38,7 @@ int unix_client_sock(void)
         return sock;
 }
 
-int mnbn_send_req(int sock, int notif_fd)
+int sbox_send_req(int sock, int notif_fd)
 {
         char buf[CMSG_SPACE(sizeof(int))];
         char c = 'c';
@@ -65,7 +65,7 @@ int mnbn_send_req(int sock, int notif_fd)
         return 0;
 }
 
-int mnbn_seccomp_init(void)
+int sbox_seccomp_init(void)
 {
         scmp_filter_ctx ctx = NULL;
         int ret, notif_fd;
@@ -124,7 +124,7 @@ err_release_out:
 
 void usage(void)
 {
-        printf("mnbn COMMAND ARGS...\n");
+        printf("sbox COMMAND ARGS...\n");
 }
 
 int main(int argc, char **argv)
@@ -140,11 +140,11 @@ int main(int argc, char **argv)
         if (sock < 0)
                 return -1;
 
-        notif_fd = mnbn_seccomp_init();
+        notif_fd = sbox_seccomp_init();
         if (notif_fd < 0)
                 return -1;
 
-        if (mnbn_send_req(sock, notif_fd) < 0)
+        if (sbox_send_req(sock, notif_fd) < 0)
                 return -1;
         close(sock);
 

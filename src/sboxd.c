@@ -17,7 +17,7 @@
 #include <linux/un.h>
 #include <seccomp.h>
 
-#include <mnbn.h>
+#include <sbox.h>
 #include <util.h>
 int verbose;
 
@@ -29,12 +29,12 @@ int caught_signal;
 #define MAX_PROC_MEMS 128
 
 
-struct mnbnd_mem {
+struct sboxd_mem {
         uintptr_t start, end;
 };
 
 /* XXX: ughhh,, global vars. ultra tekitou work */
-struct mnbnd_proc {
+struct sboxd_proc {
         pid_t pid;
 
         /* cache of checked fds */
@@ -42,12 +42,12 @@ struct mnbnd_proc {
         fd_set secure_fds;      /* secure fds in the fds */
         fd_set insecure_fds;    /* insecure fds in the fds*/
 
-        struct mnbnd_mem *mems[MAX_PROC_MEMS];
+        struct sboxd_mem *mems[MAX_PROC_MEMS];
 };
 
-struct mnbnd_proc procs[MAX_PROCS];
+struct sboxd_proc procs[MAX_PROCS];
 
-struct mnbnd_proc *mnbnd_proc_recycle(struct mnbnd_proc *p)
+struct sboxd_proc *sboxd_proc_recycle(struct sboxd_proc *p)
 {
         int n;
         for (n = 0; n < MAX_PROC_MEMS; n++) {
@@ -58,9 +58,9 @@ struct mnbnd_proc *mnbnd_proc_recycle(struct mnbnd_proc *p)
         return p;
 }
 
-struct mnbnd_proc *mnbnd_proc_alloc(pid_t pid)
+struct sboxd_proc *sboxd_proc_alloc(pid_t pid)
 {
-        struct mnbnd_proc *p = NULL;
+        struct sboxd_proc *p = NULL;
         struct stat buf;
         char path[PATH_MAX];
         int n;
@@ -77,7 +77,7 @@ struct mnbnd_proc *mnbnd_proc_alloc(pid_t pid)
                 snprintf(path, sizeof(path), "/proc/%d", procs[n].pid);
                 if (stat(path, &buf) != 0) {
                         /* this pid process doesn't exist. recycle */
-                        p = mnbnd_proc_recycle(&procs[n]);
+                        p = sboxd_proc_recycle(&procs[n]);
                         break;
                 }
         }
@@ -92,7 +92,7 @@ struct mnbnd_proc *mnbnd_proc_alloc(pid_t pid)
         return p;
 }
 
-struct mnbnd_proc *mnbnd_proc_find(pid_t pid)
+struct sboxd_proc *sboxd_proc_find(pid_t pid)
 {
         int n;
         for (n = 0; n < MAX_PROCS; n++) {
@@ -100,15 +100,15 @@ struct mnbnd_proc *mnbnd_proc_find(pid_t pid)
                         return &procs[n];
         }
 
-        return mnbnd_proc_alloc(pid);
+        return sboxd_proc_alloc(pid);
 }
 
 
-int mnbnd_proc_add_mem(struct mnbnd_proc *p, uintptr_t start, size_t len)
+int sboxd_proc_add_mem(struct sboxd_proc *p, uintptr_t start, size_t len)
 {
         /* XXX: Ultra Tekitou Work */
 
-        struct mnbnd_mem *m;
+        struct sboxd_mem *m;
         int n;
 
         m = malloc(sizeof(*m));
@@ -128,10 +128,10 @@ int mnbnd_proc_add_mem(struct mnbnd_proc *p, uintptr_t start, size_t len)
 }
 
 
-int mnbnd_proc_check_mem(struct mnbnd_proc *p, uintptr_t start, size_t len)
+int sboxd_proc_check_mem(struct sboxd_proc *p, uintptr_t start, size_t len)
 {
         uintptr_t end = start + len;
-        struct mnbnd_mem *m;
+        struct sboxd_mem *m;
         int n;
 
         for (n = 0; n < MAX_PROC_MEMS; n++) {
@@ -160,7 +160,7 @@ int unix_serv_sock(void)
         struct sockaddr_un saddr_un;
         int sock;
         
-        pr_v3("create unix server socket on %s\n", MNBND_UNIX_DOMAIN);
+        pr_v3("create unix server socket on %s\n", SBOXD_UNIX_DOMAIN);
 
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock < 0) {
@@ -170,11 +170,11 @@ int unix_serv_sock(void)
 
         memset(&saddr_un, 0, sizeof(saddr_un));
         saddr_un.sun_family = AF_UNIX;
-        strncpy(saddr_un.sun_path, MNBND_UNIX_DOMAIN, UNIX_PATH_MAX);
+        strncpy(saddr_un.sun_path, SBOXD_UNIX_DOMAIN, UNIX_PATH_MAX);
 
         if (bind(sock, (struct sockaddr *)&saddr_un, sizeof(saddr_un)) < 0) {
                 pr_err("failed to bind unix socket on %s: %s\n",
-                       MNBND_UNIX_DOMAIN, strerror(errno));
+                       SBOXD_UNIX_DOMAIN, strerror(errno));
                 close(sock);
                 return -1;
         }
@@ -186,11 +186,11 @@ int unix_serv_sock(void)
                 return -1;
         }
 
-        if (chmod(MNBND_UNIX_DOMAIN,
+        if (chmod(SBOXD_UNIX_DOMAIN,
                   (S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP |
                    S_IROTH | S_IWOTH)) < 0) {
                 pr_err("failed to set permission of %s: %s\n",
-                       MNBND_UNIX_DOMAIN, strerror(errno));
+                       SBOXD_UNIX_DOMAIN, strerror(errno));
                 close(sock);
                 return -1;
         }
@@ -225,7 +225,7 @@ ssize_t process_vm_write(pid_t pid, uintptr_t dest, void *buf, size_t count)
         return process_vm_writev(pid, &local, 1, &remote, 1, 0);
 }
 
-int mnbnd_compromise_buf(struct mnbnd_proc *p, uintptr_t dest, size_t count)
+int sboxd_compromise_buf(struct sboxd_proc *p, uintptr_t dest, size_t count)
 {
         char buf[count];
         int n;
@@ -249,7 +249,7 @@ int mnbnd_compromise_buf(struct mnbnd_proc *p, uintptr_t dest, size_t count)
         return 0;
 }
 
-int mnbnd_is_secure_fd(struct mnbnd_proc *p, int fd)
+int sboxd_is_secure_fd(struct sboxd_proc *p, int fd)
 {
         /* return value 1 means fd is opened on file path contains
          *  "secure", 0 means not secure, and -1 is error;
@@ -282,7 +282,7 @@ int mnbnd_is_secure_fd(struct mnbnd_proc *p, int fd)
         return 0;
 }
 
-void mnbnd_handle_read(struct mnbnd_proc *t, struct seccomp_notif *req)
+void sboxd_handle_read(struct sboxd_proc *t, struct seccomp_notif *req)
 {
         int ret, fd;
         __u64 *args;
@@ -291,7 +291,7 @@ void mnbnd_handle_read(struct mnbnd_proc *t, struct seccomp_notif *req)
         fd = args[0];
 
 
-        ret = mnbnd_is_secure_fd(t, fd);
+        ret = sboxd_is_secure_fd(t, fd);
         if (ret < -1)
                 return;
 
@@ -301,14 +301,14 @@ void mnbnd_handle_read(struct mnbnd_proc *t, struct seccomp_notif *req)
         if (ret) {
                 /* fd is secure. mark this buf region has secure content */
                 pr_v3("pid=%d read from secure fd %d\n", req->pid, fd);
-                if(mnbnd_proc_add_mem(t, args[1], args[2]) < 0)
+                if(sboxd_proc_add_mem(t, args[1], args[2]) < 0)
                         return; /* XXX: should stop the process */
         } else {
                 pr_v3("read from insecure fd %d\n", fd);
         }
 }
 
-void mnbnd_handle_write(struct mnbnd_proc *t, struct seccomp_notif *req)
+void sboxd_handle_write(struct sboxd_proc *t, struct seccomp_notif *req)
 {
         int ret, fd;
         __u64 *args;
@@ -316,7 +316,7 @@ void mnbnd_handle_write(struct mnbnd_proc *t, struct seccomp_notif *req)
         args = req->data.args;
         fd = args[0];
 
-        ret = mnbnd_is_secure_fd(t, fd);
+        ret = sboxd_is_secure_fd(t, fd);
         if (ret < -1)
                 return;
 
@@ -329,18 +329,18 @@ void mnbnd_handle_write(struct mnbnd_proc *t, struct seccomp_notif *req)
         }
 
         /* write to unsecure fd. check whether buf has secure content */
-        ret = mnbnd_proc_check_mem(t, args[1], args[2]);
+        ret = sboxd_proc_check_mem(t, args[1], args[2]);
         if (ret) {
                 pr_warn("pid=%d write secure buf to insecure fd %d !!!!\n",
                         req->pid, fd);
-                if (mnbnd_compromise_buf(t, args[1], args[2]) < 0)
+                if (sboxd_compromise_buf(t, args[1], args[2]) < 0)
                         pr_err("failed to compromise output\n");
         } else {
                 pr_v3("write insecure buf to insecure fd %d\n", fd);
         }
 }
 
-void mnbnd_handle_close(struct mnbnd_proc *p, struct seccomp_notif *req)
+void sboxd_handle_close(struct sboxd_proc *p, struct seccomp_notif *req)
 {
         int fd = req->data.args[0];
  
@@ -351,10 +351,10 @@ void mnbnd_handle_close(struct mnbnd_proc *p, struct seccomp_notif *req)
         }
 }
 
-void mnbnd_handle_req(int notif_fd, struct seccomp_notif *req,
+void sboxd_handle_req(int notif_fd, struct seccomp_notif *req,
                       struct seccomp_notif_resp *rep)
 {
-        struct mnbnd_proc *p;
+        struct sboxd_proc *p;
         char *syscall;
         int ret;
 
@@ -367,18 +367,18 @@ void mnbnd_handle_req(int notif_fd, struct seccomp_notif *req,
         }
 
         pr_v2("syscall %s\n", syscall);
-        p = mnbnd_proc_find(req->pid);
+        p = sboxd_proc_find(req->pid);
         if (!p) {
                 pr_err("abort\n");
                 goto out;
         }
 
         if (strcmp(syscall, "read") == 0) {
-                mnbnd_handle_read(p, req);
+                sboxd_handle_read(p, req);
         } else if (strcmp(syscall, "write") == 0) {
-                mnbnd_handle_write(p, req);
+                sboxd_handle_write(p, req);
         } else if (strcmp(syscall, "close") == 0) {
-                mnbnd_handle_close(p, req);
+                sboxd_handle_close(p, req);
         }
 
 out:
@@ -395,7 +395,7 @@ out:
         }
 }
 
-void *mnbnd_thread(void *arg)
+void *sboxd_thread(void *arg)
 {
         int notif_fd = *((int *)arg);
         struct seccomp_notif_resp *rep = NULL;
@@ -464,20 +464,20 @@ void *mnbnd_thread(void *arg)
                 }
 
                 /* handle notif req */
-                mnbnd_handle_req(notif_fd, req, rep);
+                sboxd_handle_req(notif_fd, req, rep);
         }
         
-        pr_v1("clean up mnbnd_thread for notif_fd %d\n", notif_fd);
+        pr_v1("clean up sboxd_thread for notif_fd %d\n", notif_fd);
               
         seccomp_notify_free(req, rep);
 err_out:
         close(notif_fd);
-        pr_v1("exit mnbnd thread for notif_fd %d\n", notif_fd);
+        pr_v1("exit sboxd thread for notif_fd %d\n", notif_fd);
         free(arg);
         return NULL;
 }
 
-void mnbnd_spawn(int notif_fd)
+void sboxd_spawn(int notif_fd)
 {
         pthread_t tid;
         int *fd;
@@ -487,11 +487,11 @@ void mnbnd_spawn(int notif_fd)
         fd = malloc(sizeof(int));
         *fd = notif_fd;
 
-        if (pthread_create(&tid, NULL, mnbnd_thread, fd) < 0)
-                pr_err("failed to spawn mnbnd thread: %s\n", strerror(errno));
+        if (pthread_create(&tid, NULL, sboxd_thread, fd) < 0)
+                pr_err("failed to spawn sboxd thread: %s\n", strerror(errno));
 }
 
-int mnbnd_recv_req(int sock)
+int sboxd_recv_req(int sock)
 {
         char buf[CMSG_SPACE(sizeof(int))], c;
         struct msghdr msg = {};
@@ -515,7 +515,7 @@ int mnbnd_recv_req(int sock)
         return *((int *)CMSG_DATA(cmsg));
 }
 
-int mnbnd(int un_sock)
+int sboxd(int un_sock)
 {
         struct pollfd x = { .fd = un_sock, .events = POLLIN };
         struct sockaddr_storage ss;
@@ -545,17 +545,17 @@ int mnbnd(int un_sock)
                         break;
                 }
 
-                notif_fd = mnbnd_recv_req(fd);
+                notif_fd = sboxd_recv_req(fd);
                 if (notif_fd < 0) {
                         continue;
                 }
 
-                mnbnd_spawn(notif_fd);
+                sboxd_spawn(notif_fd);
                 close(fd);
         }
 
         close(un_sock);
-        unlink(MNBND_UNIX_DOMAIN);
+        unlink(SBOXD_UNIX_DOMAIN);
 
         return ret;
 }
@@ -569,7 +569,7 @@ void sig_handler(int sig)
 void usage(void)
 {
         printf("\n"
-               "  mnbnd: MonBan daemon, watch and catch syscalls\n"
+               "  sboxd: MonBan daemon, watch and catch syscalls\n"
                "\n"
                "  usage:\n"
                "        -v        increment verbose level\n"
@@ -609,5 +609,5 @@ int main(int argc, char **argv)
         if (un_sock < 0)
                 return -1;
 
-        return mnbnd(un_sock);
+        return sboxd(un_sock);
 }
