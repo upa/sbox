@@ -18,8 +18,8 @@ extern int verbose;
 #define pr_vl(vl, fmt, ...) do {                                        \
                 if (vl <= verbose) {                                    \
                         fprintf(stdout, "\x1b[1m\x1b[34m"               \
-                                "VERB:%s:\x1b[0m " fmt,                 \
-                                __func__, ##__VA_ARGS__);               \
+                                "VER%d:%s:\x1b[0m " fmt,                \
+                                vl, __func__, ##__VA_ARGS__);           \
                 }                                                       \
         } while(0)
 

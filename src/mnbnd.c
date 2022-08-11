@@ -1,3 +1,4 @@
+ #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -5,41 +6,147 @@
 #include <errno.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/poll.h>
-#include <linux/un.h>
+#include <sys/uio.h>
 #include <pthread.h>
+#include <linux/limits.h>
+#include <linux/un.h>
 #include <seccomp.h>
 
 #include <mnbn.h>
-
 #include <util.h>
 int verbose;
 
 int caught_signal;
 
 
-#define MAX_TARGET_FDS  128
-#define MAX_TARGET_MEMS 128
+#define MAX_PROCS     128
+#define MAX_PROC_FDS  128
+#define MAX_PROC_MEMS 128
 
-
-struct mnbnd_spoofed_fd {
-        int real_fd;    /* real fd in the target */
-        int pair_fd;    /* socket pair. a pair is passed to target*/
-};
 
 struct mnbnd_mem {
         uintptr_t start, end;
 };
 
-struct mnbnd_target {
+/* XXX: ughhh,, global vars. ultra tekitou work */
+struct mnbnd_proc {
         pid_t pid;
-        int notif_fd;         /* seccomp notify fd */
 
-        struct mnbnd_spoofed_fd *sfds[MAX_TARGET_FDS];
-        struct mnbnd_mem *mems[MAX_TARGET_MEMS];
+        /* cache of checked fds */
+        fd_set fds;             /* all fds used in this proc */
+        fd_set secure_fds;      /* secure fds in the fds */
+        fd_set insecure_fds;    /* insecure fds in the fds*/
+
+        struct mnbnd_mem *mems[MAX_PROC_MEMS];
 };
+
+struct mnbnd_proc procs[MAX_PROCS];
+
+struct mnbnd_proc *mnbnd_proc_recycle(struct mnbnd_proc *p)
+{
+        int n;
+        for (n = 0; n < MAX_PROC_MEMS; n++) {
+                if (p->mems[n]) {
+                        free(p->mems[n]);
+                }
+        }
+        return p;
+}
+
+struct mnbnd_proc *mnbnd_proc_alloc(pid_t pid)
+{
+        struct mnbnd_proc *p = NULL;
+        struct stat buf;
+        char path[PATH_MAX];
+        int n;
+
+        /* XXX: need lock? */
+
+        for (n = 0; n < MAX_PROCS; n++) {
+                if (procs[n].pid == 0) {
+                        p = &procs[n];
+                        break;
+                }
+                        
+                memset(path, 0, sizeof(path));
+                snprintf(path, sizeof(path), "/proc/%d", procs[n].pid);
+                if (stat(path, &buf) != 0) {
+                        /* this pid process doesn't exist. recycle */
+                        p = mnbnd_proc_recycle(&procs[n]);
+                        break;
+                }
+        }
+
+        if (!p) {
+                pr_err("no available proc slot!\n");
+                return NULL;
+        }
+
+        memset(p, 0, sizeof(*p));
+        p->pid = pid;
+        return p;
+}
+
+struct mnbnd_proc *mnbnd_proc_find(pid_t pid)
+{
+        int n;
+        for (n = 0; n < MAX_PROCS; n++) {
+                if (procs[n].pid == pid)
+                        return &procs[n];
+        }
+
+        return mnbnd_proc_alloc(pid);
+}
+
+
+int mnbnd_proc_add_mem(struct mnbnd_proc *p, uintptr_t start, size_t len)
+{
+        /* XXX: Ultra Tekitou Work */
+
+        struct mnbnd_mem *m;
+        int n;
+
+        m = malloc(sizeof(*m));
+        memset(m, 0, sizeof(*m));
+        m->start = start;
+        m->end = start + len;
+
+         for (n = 0; n < MAX_PROC_MEMS; n++) {
+                if (p->mems[n] == NULL) {
+                        p->mems[n] = m;
+                        return 0;
+                }
+        }
+
+        pr_err("no space to store mem region for pid %d\n", p->pid);
+        return -1;
+}
+
+
+int mnbnd_proc_check_mem(struct mnbnd_proc *p, uintptr_t start, size_t len)
+{
+        uintptr_t end = start + len;
+        struct mnbnd_mem *m;
+        int n;
+
+        for (n = 0; n < MAX_PROC_MEMS; n++) {
+                m = p->mems[n];
+                if (!m)
+                        continue;
+
+                /* check are regions overlapped */
+                if ((start <= m->start && m->start <= end) ||
+                    (start <= m->end && m->end <= end))
+                        return 1;
+        }
+
+        return 0;
+}
 
 static int seccomp(unsigned int op, unsigned int flags, void *args)
 {
@@ -79,30 +186,225 @@ int unix_serv_sock(void)
                 return -1;
         }
 
+        if (chmod(MNBND_UNIX_DOMAIN,
+                  (S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP |
+                   S_IROTH | S_IWOTH)) < 0) {
+                pr_err("failed to set permission of %s: %s\n",
+                       MNBND_UNIX_DOMAIN, strerror(errno));
+                close(sock);
+                return -1;
+        }
+
+
         return sock;
 }
 
-void mnbnd_handle_req(struct mnbnd_target *t, struct seccomp_notif *req,
+
+
+ssize_t process_vm_read(pid_t pid, uintptr_t dest, void *buf, size_t count)
+{
+        struct iovec local, remote;
+
+        local.iov_base = buf;
+        local.iov_len = count;
+        remote.iov_base = (void *)dest;
+        remote.iov_len = count;
+
+        return process_vm_readv(pid, &local, 1, &remote, 1, 0);
+}
+
+ssize_t process_vm_write(pid_t pid, uintptr_t dest, void *buf, size_t count)
+{
+        struct iovec local, remote;
+
+        local.iov_base = buf;
+        local.iov_len = count;
+        remote.iov_base = (void *)dest;
+        remote.iov_len = count;
+
+        return process_vm_writev(pid, &local, 1, &remote, 1, 0);
+}
+
+int mnbnd_compromise_buf(struct mnbnd_proc *p, uintptr_t dest, size_t count)
+{
+        char buf[count];
+        int n;
+
+        if (process_vm_read(p->pid, dest, buf, count) < 0) {
+                pr_err("process_vm_read: %s\n", strerror(errno));
+                return -1;
+        }
+
+        for (n = 0; n < count; n++) {
+                if (buf[n] != '\n' && rand() & 0x1) {
+                        buf[n] = 'X';
+                }
+        }
+
+        if (process_vm_write(p->pid, dest, buf, count) < 0) {
+                pr_err("process_vm_write: %s\n", strerror(errno));
+                return -1;
+        }
+
+        return 0;
+}
+
+int mnbnd_is_secure_fd(struct mnbnd_proc *p, int fd)
+{
+        /* return value 1 means fd is opened on file path contains
+         *  "secure", 0 means not secure, and -1 is error;
+         */
+        char proc_path[PATH_MAX], file_path[PATH_MAX];
+
+#if 0
+        /* check cache */
+        if (FD_ISSET(fd, &p->secure_fds))
+                return 1;
+        else if (FD_ISSET(fd, &p->insecure_fds))
+                return 0;
+ #endif
+
+        /* not hit in the cache. check /proc/X/fd/FD*/
+        snprintf(proc_path, sizeof(proc_path), "/proc/%d/fd/%d", p->pid, fd);
+        memset(file_path, 0, sizeof(file_path));
+        if (readlink(proc_path, file_path, sizeof(file_path)) < 0) {
+                pr_err("readlink failed %s: %s\n", proc_path, strerror(errno));
+                return -1;
+        }
+        
+        pr_warn("check proc %s -> %s\n", proc_path, file_path);
+
+        if (strstr(file_path, "secure")) {
+                FD_SET(fd, &p->secure_fds);
+                return 1;
+        }
+
+        /* insecure fd */
+        FD_SET(fd, &p->insecure_fds);
+        return 0;
+}
+
+void mnbnd_handle_read(struct mnbnd_proc *t, struct seccomp_notif *req)
+{
+        int ret, fd;
+        __u64 *args;
+        
+        args = req->data.args;
+        fd = args[0];
+
+
+        ret = mnbnd_is_secure_fd(t, fd);
+        if (ret < -1)
+                return;
+
+        pr_v3("read fd=%d 0x%llx-0x%llx\n", fd, args[1], args[1] + args[2]);
+
+        if (ret) {
+                /* fd is secure. mark this buf region has secure content */
+                pr_v3("read from secure fd %d\n", fd);
+                if(mnbnd_proc_add_mem(t, args[1], args[2]) < 0)
+                        return; /* XXX: should stop the process */
+        } else {
+                pr_v3("read from insecure fd %d\n", fd);
+        }
+}
+
+void mnbnd_handle_write(struct mnbnd_proc *t, struct seccomp_notif *req)
+{
+        int ret, fd;
+        __u64 *args;
+
+        args = req->data.args;
+        fd = args[0];
+
+        ret = mnbnd_is_secure_fd(t, fd);
+        if (ret < -1)
+                return;
+
+        pr_v3("write fd=%d 0x%llx-0x%llx\n", fd, args[1], args[1] + args[2]);
+
+        if (ret) {
+                pr_v3("write to secure fd %d, pass\n", fd);
+                return;
+        }
+
+        /* write to unsecure fd. check whether buf has secure content */
+        ret = mnbnd_proc_check_mem(t, args[1], args[2]);
+        if (ret) {
+                pr_v1("write to secure buf to insecure fd %d!!\n", fd);
+                if (mnbnd_compromise_buf(t, args[1], args[2]) < 0)
+                        pr_err("failed to compromise output\n");
+        } else {
+                pr_v3("write to insecure buf to insecure fd %d\n", fd);
+        }
+}
+
+void mnbnd_handle_close(struct mnbnd_proc *p, struct seccomp_notif *req)
+{
+        int fd = req->data.args[0];
+ 
+        if (fd >= 0) {
+                pr_v3("close fd %d\n", fd);
+                FD_CLR(fd, &p->secure_fds);
+                FD_CLR(fd, &p->insecure_fds);
+        }
+}
+
+void mnbnd_handle_req(int notif_fd, struct seccomp_notif *req,
                       struct seccomp_notif_resp *rep)
 {
+        struct mnbnd_proc *p;
+        char *syscall;
+        int ret;
+
+        syscall = seccomp_syscall_resolve_num_arch(req->data.arch,
+                                                   req->data.nr);
+        if (!syscall) {
+                pr_warn("failed to resolve syscall syscall for %d",
+                        req->data.nr);
+                goto out;
+        }
+
+        pr_v2("syscall %s\n", syscall);
+        p = mnbnd_proc_find(req->pid);
+        if (!p) {
+                pr_err("abort\n");
+                return;
+        }
+
+        if (strcmp(syscall, "read") == 0) {
+                mnbnd_handle_read(p, req);
+        } else if (strcmp(syscall, "write") == 0) {
+                mnbnd_handle_write(p, req);
+        } else if (strcmp(syscall, "close") == 0) {
+                mnbnd_handle_close(p, req);
+        }
+
+out:
         rep->id = req->id;
         rep->val = 0;
         rep->error = 0;
         rep->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+
+        pr_v3("send notify response\n");
+        ret = seccomp_notify_respond(notif_fd, rep);
+        if (ret < 0) {
+                pr_warn("seccomp_notify_respond failed: %s\n",
+                         strerror(ret * -1));
+        }
 }
 
 void *mnbnd_thread(void *arg)
 {
-        struct mnbnd_target *t = arg;
+        int notif_fd = *((int *)arg);
         struct seccomp_notif_resp *rep = NULL;
         struct seccomp_notif *req = NULL;
         struct seccomp_notif_sizes sizes;
-        char prefix[64], *name;
         struct pollfd x[1];
+        char prefix[64];
         int ret;
 
-        snprintf(prefix, sizeof(prefix), "pid %d notif_fd %d",
-                 t->pid, t->notif_fd);
+        snprintf(prefix, sizeof(prefix), "notif_fd %d", notif_fd);
 
         if (seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &sizes) < 0) {
                 pr_err("%s: failed to get netif sizes: %s\n",
@@ -119,7 +421,7 @@ void *mnbnd_thread(void *arg)
 
         pr_v3("req=%p rep=%p\n", req, rep);
 
-        x[0].fd = t->notif_fd;
+        x[0].fd = notif_fd;
         x[0].events = POLLIN;
 
         while (1) {
@@ -146,68 +448,46 @@ void *mnbnd_thread(void *arg)
                 memset(req, 0, sizes.seccomp_notif);
                 memset(rep, 0, sizes.seccomp_notif_resp);
 
-                pr_v3("hoge\n");
-                ret = seccomp_notify_receive(t->notif_fd, req);
+                ret = seccomp_notify_receive(notif_fd, req);
                 if (ret < 0) {
-                        pr_err("%s: seccomp_notify_receive failed: %s\n",
-                               prefix, strerror(ret * -1));
+                        pr_err("%s: seccomp_notify_receive: %s, errno %s\n",
+                               prefix, strerror(ret * -1),
+                               strerror(errno));
                         break;
                 }
                 
-                pr_v3("%s: id %llx pid %d flags %u\n",
-                      prefix, req->id, req->pid, req->flags);
-                if (seccomp_notify_id_valid(t->notif_fd, req->id) != 0) {
+                if (seccomp_notify_id_valid(notif_fd, req->id) != 0) {
                         pr_warn("%s: invalid notify id. process exited?\n",
                                 prefix);
                         break;
                 }
 
-                name = seccomp_syscall_resolve_num_arch(req->data.arch,
-                                                        req->data.nr);
-                if (!name) {
-                        pr_warn("%s: failed to resolve syscall name for %d",
-                                prefix, req->data.nr);
-                } else {
-                        pr_info("%s: syscall %s\n", prefix, name);
-                }
-
                 /* handle notif req */
-                mnbnd_handle_req(t, req, rep);
 
-                pr_v3("%s: send notify response\n", prefix);
-                ret = seccomp_notify_respond(t->notif_fd, rep);
-                if (ret < 0) {
-                        pr_warn("%s: seccomp_notify_respond failed: %s\n",
-                                prefix, strerror(ret * -1));
-                }
-
+                mnbnd_handle_req(notif_fd, req, rep);
         }
         
-        pr_v1("clean up mnbnd_thread for pid %u notif_fd %d\n",
-              t->pid, t->notif_fd);
+        pr_v1("clean up mnbnd_thread for notif_fd %d\n", notif_fd);
+              
         seccomp_notify_free(req, rep);
 err_out:
-        close(t->notif_fd);
-        pr_v1("exit mnbnd thread for pid %u notif_fd %d\n",
-              t->pid, t->notif_fd);
-        free(t);
+        close(notif_fd);
+        pr_v1("exit mnbnd thread for notif_fd %d\n", notif_fd);
+        free(arg);
         return NULL;
 }
 
-void mnbnd_spawn(int notif_fd, struct mnbn_target_req *req)
+void mnbnd_spawn(int notif_fd)
 {
-        struct mnbnd_target *t;
         pthread_t tid;
+        int *fd;
 
-        pr_v1("spawn thread for pid %d notif_fd %d\n", req->pid, notif_fd);
+        pr_v1("spawn thread for notif_fd %d\n", notif_fd);
 
-        t = (struct mnbnd_target *)malloc(sizeof(*t));
-        memset(t, 0, sizeof(*t));
+        fd = malloc(sizeof(int));
+        *fd = notif_fd;
 
-        t->pid = req->pid;
-        t->notif_fd = notif_fd;
-
-        if (pthread_create(&tid, NULL, mnbnd_thread, t) < 0)
+        if (pthread_create(&tid, NULL, mnbnd_thread, fd) < 0)
                 pr_err("failed to spawn mnbnd thread: %s\n", strerror(errno));
 }
 
@@ -274,7 +554,7 @@ int mnbnd(int un_sock)
                         continue;
                 }
 
-                mnbnd_spawn(notif_fd, &req);
+                mnbnd_spawn(notif_fd);
                 close(fd);
         }
 
@@ -319,6 +599,9 @@ int main(int argc, char **argv)
                         return -1;
                 }
         }
+
+        srand(time(NULL));
+        memset(procs, 0, sizeof(procs));
         
         if (signal(SIGINT, sig_handler) == SIG_ERR) {
                 pr_err("cannot set signal handler for SIGINT: %s\n",

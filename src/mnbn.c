@@ -9,7 +9,7 @@
 
 #include <mnbn.h>
 #include <util.h>
-int verbose = 3;
+int verbose = 0;
 
 
 int unix_client_sock(void)
@@ -102,6 +102,7 @@ int mnbn_seccomp_init(void)
         rule_add(writev);
         rule_add(read);
         rule_add(readv);
+        rule_add(close);
 
         pr_v2("load seccomp\n");
         if (seccomp_load(ctx) != 0) {
@@ -146,6 +147,7 @@ int main(int argc, char **argv)
 
         if (mnbn_send_req(sock, notif_fd) < 0)
                 return -1;
+        close(sock);
 
         argc--;
         argv++;
