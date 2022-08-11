@@ -38,7 +38,7 @@ int unix_client_sock(void)
         return sock;
 }
 
-int sbox_send_req(int sock, int notif_fd)
+int sbox_send_notify_fd(int sock, int notif_fd)
 {
         char buf[CMSG_SPACE(sizeof(int))];
         char c = 'c';
@@ -144,7 +144,7 @@ int main(int argc, char **argv)
         if (notif_fd < 0)
                 return -1;
 
-        if (sbox_send_req(sock, notif_fd) < 0)
+        if (sbox_send_notify_fd(sock, notif_fd) < 0)
                 return -1;
         close(sock);
 

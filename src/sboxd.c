@@ -491,7 +491,7 @@ void sboxd_spawn(int notif_fd)
                 pr_err("failed to spawn sboxd thread: %s\n", strerror(errno));
 }
 
-int sboxd_recv_req(int sock)
+int sboxd_recv_notify_fd(int sock)
 {
         char buf[CMSG_SPACE(sizeof(int))], c;
         struct msghdr msg = {};
@@ -545,7 +545,7 @@ int sboxd(int un_sock)
                         break;
                 }
 
-                notif_fd = sboxd_recv_req(fd);
+                notif_fd = sboxd_recv_notify_fd(fd);
                 if (notif_fd < 0) {
                         continue;
                 }
