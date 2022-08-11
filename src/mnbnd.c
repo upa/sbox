@@ -94,11 +94,11 @@ void mnbnd_handle_req(struct mnbnd_target *t, struct seccomp_notif *req,
 void *mnbnd_thread(void *arg)
 {
         struct mnbnd_target *t = arg;
-        struct pollfd x = { .fd = t->notif_fd, .events = POLLIN };
         struct seccomp_notif_resp *rep = NULL;
         struct seccomp_notif *req = NULL;
         struct seccomp_notif_sizes sizes;
         char prefix[64], *name;
+        struct pollfd x[1];
         int ret;
 
         snprintf(prefix, sizeof(prefix), "pid %d notif_fd %d",
@@ -119,11 +119,14 @@ void *mnbnd_thread(void *arg)
 
         pr_v3("req=%p rep=%p\n", req, rep);
 
+        x[0].fd = t->notif_fd;
+        x[0].events = POLLIN;
+
         while (1) {
                 if (caught_signal)
                         break;
 
-                if (poll(&x, 1, 1000) < 0) {
+                if (poll(x, 1, -1) < 0) {
                         if (errno != EINTR) {
                                 pr_err("%s: poll failed: %s\n",
                                        prefix, strerror(errno));
@@ -131,13 +134,19 @@ void *mnbnd_thread(void *arg)
                         break;
                 }
                 
-                if (!x.revents & POLLIN)
+                if (x[0].revents & POLLHUP) {
+                        pr_v3("poll hup\n");
+                        break;
+                }
+
+                if (!(x[0].revents & POLLIN))
                         continue;
 
                 pr_v3("%s: seccomp notify in!\n", prefix);
                 memset(req, 0, sizes.seccomp_notif);
                 memset(rep, 0, sizes.seccomp_notif_resp);
 
+                pr_v3("hoge\n");
                 ret = seccomp_notify_receive(t->notif_fd, req);
                 if (ret < 0) {
                         pr_err("%s: seccomp_notify_receive failed: %s\n",
